@@ -1,10 +1,10 @@
 #pragma once
 #include <utility>
-
 #include <boost/asio.hpp>
 #include <memory>
 #include <functional>
 #include <string>
+#include <deque>
 
 class Connection : public std::enable_shared_from_this<Connection> {
 public:
@@ -13,8 +13,8 @@ public:
 
     Connection(tcp::socket socket, MessageHandler handler);
 
-    void start();
-    void send_line(const std::string& line);
+    void start();                      // запустить асинхронное чтение
+    void send_line(const std::string& line); // асинхронно отправить строку с '\n'
 
     tcp::socket& socket() { return socket_; }
 
@@ -25,7 +25,7 @@ private:
     tcp::socket socket_;
     boost::asio::streambuf read_buf_;
 
-    std::string write_queue_;
+    std::deque<std::string> write_queue_; // очередь строк на отправку
     bool writing_ = false;
 
     MessageHandler handler_;
