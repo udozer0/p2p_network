@@ -7,15 +7,20 @@ Peer::Peer(boost::asio::io_context& ctx, uint16_t listen_port, std::string id)
     : ctx_(ctx),
       acceptor_(ctx, tcp::endpoint(tcp::v4(), listen_port)),
       id_(std::move(id)),
-      listen_port_(listen_port)
+      listen_port_(listen_port),
+      ping_timer_(ctx_)
 {
 }
+
 
 void Peer::start() {
     do_accept();
     std::cout << "Peer " << id_ << " listening on port "
               << acceptor_.local_endpoint().port() << "\n";
+
+    schedule_ping(); // <–– запускаем heartbeat
 }
+
 
 void Peer::do_accept() {
     acceptor_.async_accept(
@@ -190,4 +195,33 @@ void Peer::maybe_connect_to_peer(const std::string& host, uint16_t port) {
 
     // используем уже существующий connect_to
     connect_to(host, port);
+}
+
+void Peer::schedule_ping() {
+    using namespace std::chrono_literals;
+
+    ping_timer_.expires_after(15s); // каждые 5 секунд
+    ping_timer_.async_wait([this](boost::system::error_code ec) {
+        if (ec == boost::asio::error::operation_aborted) {
+            return; // таймер отменён, уходим
+        }
+
+        if (ec) {
+            std::cerr << "[" << id_ << "] ping timer error: "
+                      << ec.message() << "\n";
+        } else {
+            // шлём PING всем активным коннекциям
+            std::cout << "[" << id_ << "] sending heartbeat PING to "
+                      << connections_.size() << " connections\n";
+
+            for (auto& conn : connections_) {
+                if (conn) {
+                    conn->send_line("PING");
+                }
+            }
+        }
+
+        // перепланируем следующий тик
+        schedule_ping();
+    });
 }

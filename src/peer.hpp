@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+
 #include <boost/asio.hpp>
 
 #include "connection.hpp"
@@ -15,7 +16,6 @@ public:
     Peer(boost::asio::io_context& ctx, uint16_t listen_port, std::string id);
 
     void start();
-
     void connect_to(const std::string& host, uint16_t port);
 
 private:
@@ -29,15 +29,17 @@ private:
     void handle_peers_message(const std::string& msg);
 
     void maybe_connect_to_peer(const std::string& host, uint16_t port);
-    
+
+    void schedule_ping(); // heartbeat
+
     boost::asio::io_context& ctx_;
     tcp::acceptor acceptor_;
     std::string id_;
     uint16_t listen_port_;
 
-
     std::vector<std::shared_ptr<Connection>> connections_;
-    std::set<std::string> known_peers_;     // "ip:port"
+    std::set<std::string> known_peers_;     // ip:port
     std::set<std::string> outbound_peers_;  // к кому уже инициировали connect
 
+    boost::asio::steady_timer ping_timer_;  // таймер для PING
 };
