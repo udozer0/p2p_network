@@ -9,7 +9,7 @@
 StunClient::StunClient(boost::asio::io_context& ctx)
     : ctx_(ctx),
       socket_(ctx, udp::v4()),
-      server_endpoint_(udp::resolver(ctx).resolve("stun.l.google.com", "19302").begin()->endpoint())
+      server_endpoint_(udp::resolver(ctx).resolve("stunserver.org", "3478").begin()->endpoint())
 {
 }
 
@@ -50,12 +50,14 @@ void StunClient::handle_response(const boost::system::error_code& ec, std::size_
     Result res;
     res.success = false;
 
-    if (ec || bytes < 20) {
+    if (ec) {
+        std::cerr << "[STUN] Error: " << ec.message() << "\n";
         callback_(res);
         return;
     }
 
-    if (buffer_[0] != 0x01 || buffer_[1] != 0x01) { // Binding Success Response
+    if (bytes < 20) {
+        std::cerr << "[STUN] Response too short: " << bytes << " bytes\n";
         callback_(res);
         return;
     }
