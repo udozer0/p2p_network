@@ -153,10 +153,12 @@ void Peer::on_message(const std::string& msg, std::shared_ptr<Connection> conn) 
 }
 
 void Peer::on_stun_result(StunClient::Result result) {
+    
+    std::cout << "[" << id_ << "] ✅ on_stun_result " "\n";
     if (result.success) {
         public_ip_ = result.public_ip;
         public_port_ = result.public_port;
-        std::cout << "[" << id_ << "] Public address: " << public_ip_ << ":" << public_port_ << "\n";
+        std::cout << "[" << id_ << "] ✅ STUN SUCCESS: Public address: " << public_ip_ << ":" << public_port_ << "\n";
 
         // Рассылаем свой публичный адрес другим пирам
         for (auto& conn : connections_) {
@@ -165,8 +167,8 @@ void Peer::on_stun_result(StunClient::Result result) {
             }
         }
     } else {
-        std::cerr << "[" << id_ << "] STUN failed, using local IP\n";
-        // Можно использовать локальный IP как fallback
+        std::cerr << "[" << id_ << "] ❌ STUN FAILED: " << result.error_message << "\n";
+        std::cerr << "[" << id_ << "] Using local IP as fallback\n";
         public_ip_ = acceptor_.local_endpoint().address().to_string();
         public_port_ = listen_port_;
     }

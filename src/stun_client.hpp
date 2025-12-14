@@ -14,6 +14,7 @@ public:
         std::string public_ip;
         uint16_t public_port;
         bool success = false;
+        std::string error_message;
     };
 
     StunClient(boost::asio::io_context& ctx);

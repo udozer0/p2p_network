@@ -1,9 +1,9 @@
 // stun_client.cpp
 #define BOOST_ASIO_DISABLEAwaitable
-#include <utility>  // для std::exchange (на случай, если он понадобится)
+#include <utility>
+#include <iostream>  // для логов
 
 #include "stun_client.hpp"
-#include <iostream>
 #include <cstring>
 
 StunClient::StunClient(boost::asio::io_context& ctx)
@@ -11,10 +11,14 @@ StunClient::StunClient(boost::asio::io_context& ctx)
       socket_(ctx, udp::v4()),
       server_endpoint_(udp::resolver(ctx).resolve("stunserver.org", "3478").begin()->endpoint())
 {
+    std::cout << "[STUN] Using server: stunserver.org:3478\n";
 }
 
 void StunClient::get_public_address(std::function<void(Result)> callback) {
     callback_ = std::move(callback);
+
+    // Логируем начало запроса
+    std::cout << "[STUN] Sending request to " << server_endpoint_ << "\n";
 
     unsigned char request[] = {
         0x00, 0x01, 0x00, 0x00,  // Type: Binding Request, Length: 0
@@ -29,11 +33,15 @@ void StunClient::get_public_address(std::function<void(Result)> callback) {
         server_endpoint_,
         [this](const boost::system::error_code& ec, std::size_t /*bytes*/) {
             if (ec) {
+                std::cerr << "[STUN] Send error: " << ec.message() << "\n";
                 Result res;
                 res.success = false;
+                res.error_message = "Send error: " + ec.message();
                 callback_(res);
                 return;
             }
+
+            std::cout << "[STUN] Request sent, waiting for response...\n";
 
             socket_.async_receive_from(
                 boost::asio::buffer(buffer_),
@@ -51,18 +59,30 @@ void StunClient::handle_response(const boost::system::error_code& ec, std::size_
     res.success = false;
 
     if (ec) {
-        std::cerr << "[STUN] Error: " << ec.message() << "\n";
+        std::cerr << "[STUN] Receive error: " << ec.message() << "\n";
+        res.error_message = "Receive error: " + ec.message();
         callback_(res);
         return;
     }
 
     if (bytes < 20) {
         std::cerr << "[STUN] Response too short: " << bytes << " bytes\n";
+        res.error_message = "Response too short: " + std::to_string(bytes) + " bytes";
         callback_(res);
         return;
     }
 
-    const char* ptr = buffer_.data() + 20;
+    // Проверяем заголовок
+    if (buffer_[0] != 0x01 || buffer_[1] != 0x01) { // Binding Success Response
+        std::cerr << "[STUN] Not a success response: " << std::hex << (int)buffer_[0] << " " << (int)buffer_[1] << "\n";
+        res.error_message = "Not a success response";
+        callback_(res);
+        return;
+    }
+
+    std::cout << "[STUN] Got valid response, parsing...\n";
+
+    const char* ptr = buffer_.data() + 20; // после заголовка
     const char* end = ptr + bytes - 20;
 
     while (ptr < end) {
@@ -71,9 +91,14 @@ void StunClient::handle_response(const boost::system::error_code& ec, std::size_
         uint16_t attr_type = (static_cast<uint16_t>(ptr[0]) << 8) | ptr[1];
         uint16_t attr_len = (static_cast<uint16_t>(ptr[2]) << 8) | ptr[3];
 
-        if (attr_type == 0x0020 && attr_len >= 8) {
+        if (attr_type == 0x0020 && attr_len >= 8) { // Xor-Mapped-Address
+            std::cout << "[STUN] Found Xor-Mapped-Address attribute\n";
+
             uint8_t family = ptr[4];
-            if (family != 0x01) break;
+            if (family != 0x01) {
+                std::cerr << "[STUN] Not IPv4 family: " << (int)family << "\n";
+                continue;
+            }
 
             uint16_t port_xor = (static_cast<uint16_t>(ptr[5]) << 8) | ptr[6];
             uint32_t ip_xor = (static_cast<uint32_t>(ptr[7]) << 24) |
@@ -88,10 +113,17 @@ void StunClient::handle_response(const boost::system::error_code& ec, std::size_
             res.public_ip = boost::asio::ip::address_v4(ip).to_string();
             res.public_port = port;
             res.success = true;
+
+            std::cout << "[STUN] Public address: " << res.public_ip << ":" << res.public_port << "\n";
             break;
         }
 
-        ptr += 4 + attr_len;
+        ptr += 4 + attr_len; // следующий атрибут
+    }
+
+    if (!res.success) {
+        std::cerr << "[STUN] No Xor-Mapped-Address found in response\n";
+        res.error_message = "No Xor-Mapped-Address found";
     }
 
     callback_(res);
