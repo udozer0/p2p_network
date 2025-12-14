@@ -10,6 +10,9 @@ Peer::Peer(boost::asio::io_context& ctx, uint16_t listen_port, std::string id)
       listen_port_(listen_port),
       ping_timer_(ctx_)
 {
+    // Запускаем STUN-обнаружение
+    stun_client_ = std::make_unique<StunClient>(ctx_);
+    discover_public_address();
 }
 
 
@@ -98,6 +101,11 @@ void Peer::connect_to(const std::string& host, uint16_t port) {
 }
 
 
+void Peer::discover_public_address() {
+    stun_client_->get_public_address([this](StunClient::Result result) {
+        on_stun_result(result); // <-- вызываем метод
+    });
+}
 
 void Peer::on_message(const std::string& msg, std::shared_ptr<Connection> conn) {
     std::cout << "[" << id_ << "] got: " << msg << "\n";
@@ -110,12 +118,57 @@ void Peer::on_message(const std::string& msg, std::shared_ptr<Connection> conn) 
             std::cout << "[" << id_ << "] sending: " << peers_msg << "\n";
             conn->send_line(peers_msg);
         }
+
+        // Отправляем свой публичный адрес
+        if (!public_ip_.empty()) {
+            conn->send_line("PUBLIC " + public_ip_ + ":" + std::to_string(public_port_));
+        }
     }
     else if (msg.rfind("PEERS", 0) == 0) {
         handle_peers_message(msg);
     }
     else if (msg.rfind("PING", 0) == 0) {
         conn->send_line("PONG");
+    }
+    else if (msg.rfind("PUBLIC", 0) == 0) {
+        // Обрабатываем PUBLIC сообщение
+        std::istringstream iss(msg);
+        std::string cmd, addr;
+        iss >> cmd >> addr;
+
+        auto pos = addr.find(':');
+        if (pos != std::string::npos) {
+            std::string host = addr.substr(0, pos);
+            std::string port_str = addr.substr(pos + 1);
+
+            try {
+                uint16_t port = static_cast<uint16_t>(std::stoi(port_str));
+                add_known_peer(host, port);
+                maybe_connect_to_peer(host, port);
+            } catch (...) {
+                std::cerr << "[" << id_ << "] failed to parse PUBLIC: " << addr << "\n";
+            }
+        }
+    }
+}
+
+void Peer::on_stun_result(StunClient::Result result) {
+    if (result.success) {
+        public_ip_ = result.public_ip;
+        public_port_ = result.public_port;
+        std::cout << "[" << id_ << "] Public address: " << public_ip_ << ":" << public_port_ << "\n";
+
+        // Рассылаем свой публичный адрес другим пирам
+        for (auto& conn : connections_) {
+            if (conn) {
+                conn->send_line("PUBLIC " + public_ip_ + ":" + std::to_string(public_port_));
+            }
+        }
+    } else {
+        std::cerr << "[" << id_ << "] STUN failed, using local IP\n";
+        // Можно использовать локальный IP как fallback
+        public_ip_ = acceptor_.local_endpoint().address().to_string();
+        public_port_ = listen_port_;
     }
 }
 

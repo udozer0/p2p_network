@@ -8,6 +8,7 @@
 #include <boost/asio.hpp>
 
 #include "connection.hpp"
+#include "stun_client.hpp"
 
 class Peer {
 public:
@@ -42,4 +43,10 @@ private:
     std::set<std::string> outbound_peers_;  // к кому уже инициировали connect
 
     boost::asio::steady_timer ping_timer_;  // таймер для PING
+    std::unique_ptr<StunClient> stun_client_;
+    std::string public_ip_;
+    uint16_t public_port_ = 0;
+
+    void discover_public_address();
+    void on_stun_result(StunClient::Result result);
 };
