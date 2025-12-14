@@ -84,16 +84,17 @@ void StunClient::handle_response(const boost::system::error_code& ec, std::size_
 
     const char* ptr = buffer_.data() + 20; // после заголовка
     const char* end = ptr + bytes - 20;
+    bool parsed_mapped_address = false;
 
-    while (ptr < end) {
+    while (ptr < end && !parsed_mapped_address) {
         if (end - ptr < 4) break;
 
         uint16_t attr_type = (static_cast<uint16_t>(ptr[0]) << 8) | ptr[1];
         uint16_t attr_len = (static_cast<uint16_t>(ptr[2]) << 8) | ptr[3];
 
-        if (attr_type == 0x0020 && attr_len >= 8) { // Xor-Mapped-Address
+        if (attr_type == 0x0020 && attr_len >= 8) {
+            // Парсим только первый раз
             std::cout << "[STUN] Found Xor-Mapped-Address attribute\n";
-
             uint8_t family = ptr[4];
             if (family != 0x01) {
                 std::cerr << "[STUN] Not IPv4 family: " << (int)family << "\n";
@@ -114,13 +115,12 @@ void StunClient::handle_response(const boost::system::error_code& ec, std::size_
             res.public_port = port;
             res.success = true;
 
-            std::cout << "[STUN] Public address: " << res.public_ip << ":" << res.public_port << "\n";
-            break;
+
+            parsed_mapped_address = true; // ← выходим после первого
         }
 
-        ptr += 4 + attr_len; // следующий атрибут
+        ptr += 4 + attr_len;
     }
-
     if (!res.success) {
         std::cerr << "[STUN] No Xor-Mapped-Address found in response\n";
         res.error_message = "No Xor-Mapped-Address found";
