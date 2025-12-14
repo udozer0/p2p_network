@@ -9,9 +9,9 @@
 StunClient::StunClient(boost::asio::io_context& ctx)
     : ctx_(ctx),
       socket_(ctx, udp::v4()),
-      server_endpoint_(udp::resolver(ctx).resolve("stunserver.org", "3478").begin()->endpoint())
+    server_endpoint_(udp::resolver(ctx).resolve("192.168.0.110", "3478").begin()->endpoint())
 {
-    std::cout << "[STUN] Using server: stunserver.org:3478\n";
+    std::cout << "[STUN] Using server: 192.168.0.110:3478\n";
 }
 
 void StunClient::get_public_address(std::function<void(Result)> callback) {
