@@ -9,9 +9,11 @@
 StunClient::StunClient(boost::asio::io_context& ctx)
     : ctx_(ctx),
       socket_(ctx, udp::v4()),
-    server_endpoint_(udp::resolver(ctx).resolve("192.168.0.110", "3478").begin()->endpoint())
+      server_endpoint_(udp::resolver(ctx)
+                           .resolve("77.110.104.122", "3478")
+                           .begin()->endpoint())
 {
-    std::cout << "[STUN] Using server: 192.168.0.110:3478\n";
+    std::cout << "[STUN] Using server: " << server_endpoint_ << "\n";
 }
 
 void StunClient::get_public_address(std::function<void(Result)> callback) {
@@ -71,6 +73,12 @@ void StunClient::handle_response(const boost::system::error_code& ec, std::size_
         callback_(res);
         return;
     }
+    std::cout << "[STUN] Raw response (" << bytes << " bytes):\n";
+    for (size_t i = 0; i < bytes; ++i) {
+        printf("%02X ", static_cast<unsigned char>(buffer_[i]));
+        if ((i + 1) % 16 == 0) printf("\n");
+    }
+    printf("\n");
 
     // Проверяем заголовок
     if (buffer_[0] != 0x01 || buffer_[1] != 0x01) { // Binding Success Response
@@ -90,43 +98,44 @@ void StunClient::handle_response(const boost::system::error_code& ec, std::size_
         if (end - ptr < 4) break;
 
         uint16_t attr_type = (static_cast<uint16_t>(ptr[0]) << 8) | ptr[1];
-        uint16_t attr_len = (static_cast<uint16_t>(ptr[2]) << 8) | ptr[3];
+        uint16_t attr_len  = (static_cast<uint16_t>(ptr[2]) << 8) | ptr[3];
 
-        if (attr_type == 0x0020 && attr_len >= 8) {
-            // Парсим только первый раз
-            std::cout << "[STUN] Found Xor-Mapped-Address attribute\n";
-            
+        if ((attr_type == 0x0020 || attr_type == 0x8020) && attr_len >= 8) {
+            std::cout << "[STUN] Found XOR-MAPPED-ADDRESS attribute\n";
+
             const uint8_t* attr = reinterpret_cast<const uint8_t*>(ptr);
 
-            uint8_t family = attr[5]; // 0: type_hi, 1:type_lo, 2:len_hi, 3:len_lo, 4:0, 
+            // 0:type_hi,1:type_lo,2:len_hi,3:len_lo,4:0,5:family
+            uint8_t family = attr[5];
             if (family != 0x01) {
                 std::cerr << "[STUN] Not IPv4 family: " << (int)family << "\n";
-                continue;
+            } else {
+                uint16_t xport = (static_cast<uint16_t>(attr[6]) << 8) | attr[7];
+                uint32_t xip   = (static_cast<uint32_t>(attr[8])  << 24) |
+                                (static_cast<uint32_t>(attr[9])  << 16) |
+                                (static_cast<uint32_t>(attr[10]) << 8)  |
+                                (static_cast<uint32_t>(attr[11]));
+
+                uint32_t magic_cookie = 0x2112A442;
+                uint16_t port = xport ^ static_cast<uint16_t>((magic_cookie >> 16) & 0xFFFF);
+                uint32_t ip   = xip   ^ magic_cookie;
+
+                res.public_ip   = boost::asio::ip::address_v4(ip).to_string();
+                res.public_port = port;
+                res.success     = true;
+
+                std::cout << "[STUN] Parsed public: " << res.public_ip
+                        << ":" << res.public_port << "\n";
             }
 
-            uint16_t xport = (static_cast<uint16_t>(attr[6]) << 8) | attr[7];
-            uint32_t xip   = (static_cast<uint32_t>(attr[8]) << 24) |
-                            (static_cast<uint32_t>(attr[9]) << 16) |
-                            (static_cast<uint32_t>(attr[10]) << 8) |
-                            (static_cast<uint32_t>(attr[11]));
-
-            uint32_t magic_cookie = 0x2112A442;
-            uint16_t port = xport ^ static_cast<uint16_t>((magic_cookie >> 16) & 0xFFFF);
-            uint32_t ip   = xip ^ magic_cookie;
-
-
-            res.public_ip = boost::asio::ip::address_v4(ip).to_string();
-            res.public_port = port;
-            res.success = true;
-
-
-            parsed_mapped_address = true; // ← выходим после первого
+            parsed_mapped_address = true;
         }
 
+        // выравнивание длины до 4 байт
         std::size_t padded = (attr_len + 3) & ~3u;
         ptr += 4 + padded;
-
     }
+
     if (!res.success) {
         std::cerr << "[STUN] No Xor-Mapped-Address found in response\n";
         res.error_message = "No Xor-Mapped-Address found";

@@ -255,17 +255,25 @@ void Peer::maybe_connect_to_peer(const std::string& host, uint16_t port) {
 void Peer::schedule_ping() {
     using namespace std::chrono_literals;
 
-    ping_timer_.expires_after(15s); // каждые 5 секунд
+    ping_timer_.expires_after(15s);
     ping_timer_.async_wait([this](boost::system::error_code ec) {
         if (ec == boost::asio::error::operation_aborted) {
-            return; // таймер отменён, уходим
+            return;
         }
 
-        if (ec) {
-            std::cerr << "[" << id_ << "] ping timer error: "
-                      << ec.message() << "\n";
-        } else {
-            // шлём PING всем активным коннекциям
+        // Чистим все соединения, у которых сокет закрыт
+        connections_.erase(
+            std::remove_if(
+                connections_.begin(),
+                connections_.end(),
+                [](const std::shared_ptr<Connection>& c) {
+                    return !c || !c->socket().is_open();
+                }
+            ),
+            connections_.end()
+        );
+
+        if (!ec) {
             std::cout << "[" << id_ << "] sending heartbeat PING to "
                       << connections_.size() << " connections\n";
 
@@ -276,7 +284,6 @@ void Peer::schedule_ping() {
             }
         }
 
-        // перепланируем следующий тик
         schedule_ping();
     });
 }

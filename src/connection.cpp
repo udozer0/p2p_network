@@ -39,14 +39,20 @@ void Connection::do_read() {
                     handler_(line, self);
                 }
                 do_read();
-            } else if (ec == boost::asio::error::eof) {
-                std::cerr << "Read error: End of file\n";
-            } else if (ec != boost::asio::error::operation_aborted) {
-                std::cerr << "Read error: " << ec.message() << "\n";
+            } else {
+                if (ec == boost::asio::error::eof) {
+                    std::cerr << "Read error: End of file\n";
+                } else if (ec != boost::asio::error::operation_aborted) {
+                    std::cerr << "Read error: " << ec.message() << "\n";
+                }
+                // ВАЖНО: закрыть сокет
+                socket_.close();
+                // И НИЧЕГО БОЛЬШЕ НЕ ДЕЛАТЬ (не вызывать do_read)
             }
         }
     );
 }
+
 
 void Connection::do_write() {
     if (write_queue_.empty()) {
