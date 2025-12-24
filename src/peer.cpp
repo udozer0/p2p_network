@@ -10,11 +10,15 @@ Peer::Peer(boost::asio::io_context& ctx, uint16_t listen_port, std::string id)
       listen_port_(listen_port),
       ping_timer_(ctx_)
 {
-    // Запускаем STUN-обнаружение
+    std::cout << "[" << id_ << "] ctor: starting, listen_port=" << listen_port_ << "\n";
+
     stun_client_ = std::make_unique<StunClient>(ctx_);
     discover_public_address();
+
+    std::cout << "[" << id_ << "] ctor: connecting to signaling...\n";
     connect_to_signaling("77.110.104.122", 9000);
 }
+
 
 
 void Peer::start() {
@@ -291,6 +295,7 @@ void Peer::schedule_ping() {
     });
 }
 void Peer::connect_to_signaling(const std::string& host, uint16_t port) {
+    std::cout << "[" << id_ << "] connect_to_signaling(" << host << ":" << port << ")\n";
     signal_sock_ = std::make_shared<tcp::socket>(ctx_);
     auto resolver = std::make_shared<tcp::resolver>(ctx_);
 
