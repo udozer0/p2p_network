@@ -49,4 +49,13 @@ private:
 
     void discover_public_address();
     void on_stun_result(StunClient::Result result);
+    // сигналинг
+    std::shared_ptr<tcp::socket> signal_sock_;
+    boost::asio::streambuf signal_buf_;
+
+    void connect_to_signaling(const std::string& host, uint16_t port);
+    void signal_send_line(const std::string& line);
+    void signal_do_read();
+    void handle_signal_line(const std::string& line);
+
 };
