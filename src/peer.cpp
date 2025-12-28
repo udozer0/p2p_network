@@ -304,7 +304,7 @@ void Peer::connect_to_signaling(const std::string& host, uint16_t port) {
         [this, resolver](boost::system::error_code ec, tcp::resolver::results_type res) {
             if (ec) {
                 std::cerr << "[" << id_ << "] signaling resolve error: "
-                          << ec.message() << "\n";
+                        << ec.message() << "\n";
                 return;
             }
 
@@ -313,29 +313,29 @@ void Peer::connect_to_signaling(const std::string& host, uint16_t port) {
                 [this](boost::system::error_code ec2, const tcp::endpoint& ep) {
                     if (ec2) {
                         std::cerr << "[" << id_ << "] signaling connect error: "
-                                  << ec2.message() << "\n";
+                                << ec2.message() << "\n";
                         return;
                     }
 
                     std::cout << "[" << id_ << "] connected to signaling "
-                              << ep << "\n";
+                            << ep << "\n";
 
-                    // отправляем свой ID
                     signal_send_line("ID " + id_);
 
-                    // если уже знаем публичный адрес – отправим его
                     if (!public_ip_.empty()) {
                         signal_send_line("PUBLIC " + public_ip_ + ":" +
-                                         std::to_string(public_port_));
+                                        std::to_string(public_port_));
                     }
 
                     signal_do_read();
                 });
         });
+
 }
 
 void Peer::signal_send_line(const std::string& line) {
     if (!signal_sock_ || !signal_sock_->is_open()) return;
+    std::cout << "[" << id_ << "] signaling SEND: " << line << "\n";
     auto msg = line + "\n";
     boost::asio::async_write(
         *signal_sock_, boost::asio::buffer(msg),
