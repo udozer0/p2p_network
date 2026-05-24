@@ -48,6 +48,7 @@ private:
     std::unique_ptr<StunClient> stun_client_;
     std::string public_ip_;
     uint16_t public_port_ = 0;
+    bool advertise_public_address_ = false;
 
     void discover_public_address();
     void on_stun_result(StunClient::Result result);

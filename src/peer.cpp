@@ -17,6 +17,7 @@ Peer::Peer(boost::asio::io_context& ctx, uint16_t listen_port, std::string id)
     if (const char* public_ip = std::getenv("P2P_PUBLIC_IP"); public_ip && *public_ip) {
         public_ip_ = public_ip;
         public_port_ = listen_port_;
+        advertise_public_address_ = true;
         std::cout << "[" << id_ << "] using P2P_PUBLIC_IP: " << public_ip_ << ":" << public_port_ << "\n";
     } else {
         discover_public_address();
@@ -63,25 +64,37 @@ void Peer::do_accept() {
 }
 
 void Peer::connect_to(const std::string& host, uint16_t port) {
+    if (is_self_peer(host, port)) {
+        return;
+    }
+
+    std::string key = host + ":" + std::to_string(port);
+    if (!outbound_peers_.insert(key).second) {
+        std::cout << "[" << id_ << "] already connected/connecting to " << key << "\n";
+        return;
+    }
+
     auto resolver = std::make_shared<tcp::resolver>(ctx_);
     auto sock = std::make_shared<tcp::socket>(ctx_);
 
     resolver->async_resolve(
         host, std::to_string(port),
-        [this, resolver, sock, host, port](boost::system::error_code ec,
+        [this, resolver, sock, host, port, key](boost::system::error_code ec,
                                            tcp::resolver::results_type results) {
             if (ec) {
                 std::cerr << "Resolve error: " << ec.message() << "\n";
+                outbound_peers_.erase(key);
                 return;
             }
 
             boost::asio::async_connect(
                 *sock, results,
-                [this, sock, host, port](boost::system::error_code ec2,
+                [this, sock, host, port, key](boost::system::error_code ec2,
                                          const tcp::endpoint& ep) {
                     if (ec2) {
                         std::cerr << "Connect error: "
                                   << ec2.message() << "\n";
+                        outbound_peers_.erase(key);
                         return;
                     }
                     std::cout << "Connected to " << ep << "\n";
@@ -132,7 +145,7 @@ void Peer::on_message(const std::string& msg, std::shared_ptr<Connection> conn) 
         }
 
         // Отправляем свой публичный адрес
-        if (!public_ip_.empty()) {
+        if (advertise_public_address_) {
             conn->send_line("PUBLIC " + public_ip_ + ":" + std::to_string(public_port_));
         }
     }
@@ -155,8 +168,9 @@ void Peer::on_message(const std::string& msg, std::shared_ptr<Connection> conn) 
 
             try {
                 uint16_t port = static_cast<uint16_t>(std::stoi(port_str));
-                add_known_peer(host, port);
-                maybe_connect_to_peer(host, port);
+                if (add_known_peer(host, port)) {
+                    maybe_connect_to_peer(host, port);
+                }
             } catch (...) {
                 std::cerr << "[" << id_ << "] failed to parse PUBLIC: " << addr << "\n";
             }
@@ -168,18 +182,26 @@ void Peer::on_stun_result(StunClient::Result result) {
     
     std::cout << "[" << id_ << "] ✅ on_stun_result " "\n";
     if (result.success) {
-        public_ip_ = result.public_ip;
-        public_port_ = listen_port_;
         std::cout << "[" << id_ << "] ✅ STUN SUCCESS: UDP mapped address: " << result.public_ip << ":"
                   << result.public_port << "\n";
-        std::cout << "[" << id_ << "] advertising TCP address: " << public_ip_ << ":" << public_port_ << "\n";
-        // отправляем свой публичный адрес на сигналинг
-        signal_send_line("PUBLIC " + public_ip_ + ":" +
-                         std::to_string(public_port_));
-        // Рассылаем свой публичный адрес другим пирам
-        for (auto& conn : connections_) {
-            if (conn) {
-                conn->send_line("PUBLIC " + public_ip_ + ":" + std::to_string(public_port_));
+        if (const char* advertise_stun_tcp = std::getenv("P2P_ADVERTISE_STUN_TCP");
+            advertise_stun_tcp && *advertise_stun_tcp) {
+            public_ip_ = result.public_ip;
+            public_port_ = listen_port_;
+            advertise_public_address_ = true;
+        } else {
+            std::cout << "[" << id_ << "] not advertising STUN address as TCP-reachable; set P2P_PUBLIC_IP on a VPS "
+                      << "or P2P_ADVERTISE_STUN_TCP=1 if port forwarding is configured\n";
+        }
+
+        if (advertise_public_address_) {
+            std::cout << "[" << id_ << "] advertising TCP address: " << public_ip_ << ":" << public_port_ << "\n";
+            signal_send_line("PUBLIC " + public_ip_ + ":" +
+                             std::to_string(public_port_));
+            for (auto& conn : connections_) {
+                if (conn) {
+                    conn->send_line("PUBLIC " + public_ip_ + ":" + std::to_string(public_port_));
+                }
             }
         }
     } else {
@@ -266,7 +288,6 @@ void Peer::maybe_connect_to_peer(const std::string& host, uint16_t port) {
     }
 
     std::cout << "[" << id_ << "] auto-connect to " << key << "\n";
-    outbound_peers_.insert(key);
 
     // используем уже существующий connect_to
     connect_to(host, port);
@@ -353,7 +374,7 @@ void Peer::connect_to_signaling(const std::string& host, uint16_t port) {
 
                     signal_send_line("ID " + id_);
 
-                    if (!public_ip_.empty()) {
+                    if (advertise_public_address_) {
                         signal_send_line("PUBLIC " + public_ip_ + ":" +
                                         std::to_string(public_port_));
                     }
