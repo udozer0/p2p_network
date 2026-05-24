@@ -109,6 +109,7 @@ void Peer::connect_to(const std::string& host, uint16_t port) {
                             on_message(msg, std::move(c));
                         }
                     );
+                    connection_peer_keys_[conn.get()] = key;
                     connections_.push_back(conn);
                     conn->start();
 
@@ -325,12 +326,39 @@ void Peer::schedule_ping() {
             std::remove_if(
                 connections_.begin(),
                 connections_.end(),
-                [](const std::shared_ptr<Connection>& c) {
-                    return !c || !c->socket().is_open();
+                [this](const std::shared_ptr<Connection>& c) {
+                    if (c && c->socket().is_open()) {
+                        return false;
+                    }
+
+                    if (c) {
+                        auto it = connection_peer_keys_.find(c.get());
+                        if (it != connection_peer_keys_.end()) {
+                            std::cout << "[" << id_ << "] outbound peer disconnected: " << it->second << "\n";
+                            outbound_peers_.erase(it->second);
+                            connection_peer_keys_.erase(it);
+                        }
+                    }
+
+                    return true;
                 }
             ),
             connections_.end()
         );
+
+        for (const auto& peer : known_peers_) {
+            auto pos = peer.find(':');
+            if (pos == std::string::npos) {
+                continue;
+            }
+
+            try {
+                maybe_connect_to_peer(peer.substr(0, pos), static_cast<uint16_t>(std::stoi(peer.substr(pos + 1))));
+            }
+            catch (...) {
+                std::cerr << "[" << id_ << "] failed to parse known peer during reconnect: " << peer << "\n";
+            }
+        }
 
         if (!ec) {
             std::cout << "[" << id_ << "] sending heartbeat PING to "

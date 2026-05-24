@@ -1,6 +1,7 @@
 #pragma once
 #include <utility>
 #include <deque>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -41,6 +42,7 @@ private:
     uint16_t listen_port_;
 
     std::vector<std::shared_ptr<Connection>> connections_;
+    std::map<Connection*, std::string> connection_peer_keys_;
     std::set<std::string> known_peers_;     // ip:port
     std::set<std::string> outbound_peers_;  // к кому уже инициировали connect
 
