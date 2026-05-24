@@ -1,5 +1,6 @@
 #pragma once
 #include <utility>
+#include <deque>
 #include <set>
 #include <string>
 #include <vector>
@@ -55,7 +56,11 @@ private:
 
     void connect_to_signaling(const std::string& host, uint16_t port);
     void signal_send_line(const std::string& line);
+    void signal_do_write();
     void signal_do_read();
     void handle_signal_line(const std::string& line);
+
+    std::deque<std::string> signal_write_queue_;
+    bool signal_writing_ = false;
 
 };

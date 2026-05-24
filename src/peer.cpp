@@ -162,8 +162,10 @@ void Peer::on_stun_result(StunClient::Result result) {
     std::cout << "[" << id_ << "] ✅ on_stun_result " "\n";
     if (result.success) {
         public_ip_ = result.public_ip;
-        public_port_ = result.public_port;
-        std::cout << "[" << id_ << "] ✅ STUN SUCCESS: Public address: " << public_ip_ << ":" << public_port_ << "\n";
+        public_port_ = listen_port_;
+        std::cout << "[" << id_ << "] ✅ STUN SUCCESS: UDP mapped address: " << result.public_ip << ":"
+                  << result.public_port << "\n";
+        std::cout << "[" << id_ << "] advertising TCP address: " << public_ip_ << ":" << public_port_ << "\n";
         // отправляем свой публичный адрес на сигналинг
         signal_send_line("PUBLIC " + public_ip_ + ":" +
                          std::to_string(public_port_));
@@ -175,9 +177,9 @@ void Peer::on_stun_result(StunClient::Result result) {
         }
     } else {
         std::cerr << "[" << id_ << "] ❌ STUN FAILED: " << result.error_message << "\n";
-        std::cerr << "[" << id_ << "] Using local IP as fallback\n";
-        public_ip_ = acceptor_.local_endpoint().address().to_string();
-        public_port_ = listen_port_;
+        std::cerr << "[" << id_ << "] Public address is unknown; not advertising 0.0.0.0\n";
+        public_ip_.clear();
+        public_port_ = 0;
     }
 }
 
@@ -336,14 +338,48 @@ void Peer::connect_to_signaling(const std::string& host, uint16_t port) {
 void Peer::signal_send_line(const std::string& line) {
     if (!signal_sock_ || !signal_sock_->is_open()) return;
     std::cout << "[" << id_ << "] signaling SEND: " << line << "\n";
-    auto msg = line + "\n";
+
+    boost::asio::post(signal_sock_->get_executor(), [this, line]() {
+        if (!signal_sock_ || !signal_sock_->is_open()) {
+            return;
+        }
+
+        signal_write_queue_.push_back(line + "\n");
+        if (!signal_writing_) {
+            signal_writing_ = true;
+            signal_do_write();
+        }
+    });
+}
+
+void Peer::signal_do_write() {
+    if (!signal_sock_ || !signal_sock_->is_open()) {
+        signal_writing_ = false;
+        signal_write_queue_.clear();
+        return;
+    }
+
+    if (signal_write_queue_.empty()) {
+        signal_writing_ = false;
+        return;
+    }
+
     boost::asio::async_write(
-        *signal_sock_, boost::asio::buffer(msg),
+        *signal_sock_, boost::asio::buffer(signal_write_queue_.front()),
         [this](boost::system::error_code ec, std::size_t) {
             if (ec) {
                 std::cerr << "[" << id_ << "] signaling write error: "
                           << ec.message() << "\n";
+                signal_writing_ = false;
+                signal_write_queue_.clear();
+                if (signal_sock_) {
+                    signal_sock_->close();
+                }
+                return;
             }
+
+            signal_write_queue_.pop_front();
+            signal_do_write();
         });
 }
 

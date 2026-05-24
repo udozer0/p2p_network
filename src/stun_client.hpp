@@ -2,6 +2,7 @@
 #pragma once
 
 #include <boost/asio.hpp>
+#include <array>
 #include <string>
 #include <memory>
 
@@ -24,10 +25,14 @@ public:
 private:
     void send_stun_request();
     void handle_response(const boost::system::error_code& ec, std::size_t bytes_transferred);
+    void finish(Result result);
 
     boost::asio::io_context& ctx_;
     udp::socket socket_;
     udp::endpoint server_endpoint_;
+    boost::asio::steady_timer timeout_timer_;
+    std::array<unsigned char, 20> request_;
     std::array<char, 1500> buffer_;
     std::function<void(Result)> callback_;
+    bool completed_ = false;
 };
