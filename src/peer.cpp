@@ -4,6 +4,15 @@
 #include <iostream>
 #include <sstream>
 
+namespace {
+
+bool env_flag_enabled(const char* name) {
+    const char* value = std::getenv(name);
+    return value && *value && std::string(value) != "0";
+}
+
+} // namespace
+
 Peer::Peer(boost::asio::io_context& ctx, uint16_t listen_port, std::string id)
     : ctx_(ctx),
       acceptor_(ctx, tcp::endpoint(tcp::v4(), listen_port)),
@@ -19,12 +28,18 @@ Peer::Peer(boost::asio::io_context& ctx, uint16_t listen_port, std::string id)
         public_port_ = listen_port_;
         advertise_public_address_ = true;
         std::cout << "[" << id_ << "] using P2P_PUBLIC_IP: " << public_ip_ << ":" << public_port_ << "\n";
+    } else if (env_flag_enabled("P2P_DISABLE_STUN")) {
+        std::cout << "[" << id_ << "] STUN disabled by P2P_DISABLE_STUN\n";
     } else {
         discover_public_address();
     }
 
-    std::cout << "[" << id_ << "] ctor: connecting to signaling...\n";
-    connect_to_signaling("77.110.104.122", 9000);
+    if (env_flag_enabled("P2P_DISABLE_SIGNALING")) {
+        std::cout << "[" << id_ << "] signaling disabled by P2P_DISABLE_SIGNALING\n";
+    } else {
+        std::cout << "[" << id_ << "] ctor: connecting to signaling...\n";
+        connect_to_signaling("77.110.104.122", 9000);
+    }
 }
 
 
