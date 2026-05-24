@@ -1,5 +1,7 @@
 #pragma once
 #include <utility>
+#include <deque>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -8,6 +10,7 @@
 #include <boost/asio.hpp>
 
 #include "connection.hpp"
+#include "stun_client.hpp"
 
 class Peer {
 public:
@@ -29,6 +32,7 @@ private:
     void handle_peers_message(const std::string& msg);
 
     void maybe_connect_to_peer(const std::string& host, uint16_t port);
+    bool is_self_peer(const std::string& host, uint16_t port) const;
 
     void schedule_ping(); // heartbeat
 
@@ -38,8 +42,29 @@ private:
     uint16_t listen_port_;
 
     std::vector<std::shared_ptr<Connection>> connections_;
+    std::map<Connection*, std::string> connection_peer_keys_;
     std::set<std::string> known_peers_;     // ip:port
     std::set<std::string> outbound_peers_;  // к кому уже инициировали connect
 
     boost::asio::steady_timer ping_timer_;  // таймер для PING
+    std::unique_ptr<StunClient> stun_client_;
+    std::string public_ip_;
+    uint16_t public_port_ = 0;
+    bool advertise_public_address_ = false;
+
+    void discover_public_address();
+    void on_stun_result(StunClient::Result result);
+    // сигналинг
+    std::shared_ptr<tcp::socket> signal_sock_;
+    boost::asio::streambuf signal_buf_;
+
+    void connect_to_signaling(const std::string& host, uint16_t port);
+    void signal_send_line(const std::string& line);
+    void signal_do_write();
+    void signal_do_read();
+    void handle_signal_line(const std::string& line);
+
+    std::deque<std::string> signal_write_queue_;
+    bool signal_writing_ = false;
+
 };

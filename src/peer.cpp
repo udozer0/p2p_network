@@ -1,5 +1,6 @@
 #include "peer.hpp"
 
+#include <cstdlib>
 #include <iostream>
 #include <sstream>
 
@@ -10,7 +11,22 @@ Peer::Peer(boost::asio::io_context& ctx, uint16_t listen_port, std::string id)
       listen_port_(listen_port),
       ping_timer_(ctx_)
 {
+    std::cout << "[" << id_ << "] ctor: starting, listen_port=" << listen_port_ << "\n";
+
+    stun_client_ = std::make_unique<StunClient>(ctx_);
+    if (const char* public_ip = std::getenv("P2P_PUBLIC_IP"); public_ip && *public_ip) {
+        public_ip_ = public_ip;
+        public_port_ = listen_port_;
+        advertise_public_address_ = true;
+        std::cout << "[" << id_ << "] using P2P_PUBLIC_IP: " << public_ip_ << ":" << public_port_ << "\n";
+    } else {
+        discover_public_address();
+    }
+
+    std::cout << "[" << id_ << "] ctor: connecting to signaling...\n";
+    connect_to_signaling("77.110.104.122", 9000);
 }
+
 
 
 void Peer::start() {
@@ -48,25 +64,37 @@ void Peer::do_accept() {
 }
 
 void Peer::connect_to(const std::string& host, uint16_t port) {
+    if (is_self_peer(host, port)) {
+        return;
+    }
+
+    std::string key = host + ":" + std::to_string(port);
+    if (!outbound_peers_.insert(key).second) {
+        std::cout << "[" << id_ << "] already connected/connecting to " << key << "\n";
+        return;
+    }
+
     auto resolver = std::make_shared<tcp::resolver>(ctx_);
     auto sock = std::make_shared<tcp::socket>(ctx_);
 
     resolver->async_resolve(
         host, std::to_string(port),
-        [this, resolver, sock, host, port](boost::system::error_code ec,
+        [this, resolver, sock, host, port, key](boost::system::error_code ec,
                                            tcp::resolver::results_type results) {
             if (ec) {
                 std::cerr << "Resolve error: " << ec.message() << "\n";
+                outbound_peers_.erase(key);
                 return;
             }
 
             boost::asio::async_connect(
                 *sock, results,
-                [this, sock, host, port](boost::system::error_code ec2,
+                [this, sock, host, port, key](boost::system::error_code ec2,
                                          const tcp::endpoint& ep) {
                     if (ec2) {
                         std::cerr << "Connect error: "
                                   << ec2.message() << "\n";
+                        outbound_peers_.erase(key);
                         return;
                     }
                     std::cout << "Connected to " << ep << "\n";
@@ -81,6 +109,7 @@ void Peer::connect_to(const std::string& host, uint16_t port) {
                             on_message(msg, std::move(c));
                         }
                     );
+                    connection_peer_keys_[conn.get()] = key;
                     connections_.push_back(conn);
                     conn->start();
 
@@ -98,6 +127,11 @@ void Peer::connect_to(const std::string& host, uint16_t port) {
 }
 
 
+void Peer::discover_public_address() {
+    stun_client_->get_public_address([this](StunClient::Result result) {
+        on_stun_result(result); // <-- вызываем метод
+    });
+}
 
 void Peer::on_message(const std::string& msg, std::shared_ptr<Connection> conn) {
     std::cout << "[" << id_ << "] got: " << msg << "\n";
@@ -110,12 +144,72 @@ void Peer::on_message(const std::string& msg, std::shared_ptr<Connection> conn) 
             std::cout << "[" << id_ << "] sending: " << peers_msg << "\n";
             conn->send_line(peers_msg);
         }
+
+        // Отправляем свой публичный адрес
+        if (advertise_public_address_) {
+            conn->send_line("PUBLIC " + public_ip_ + ":" + std::to_string(public_port_));
+        }
     }
     else if (msg.rfind("PEERS", 0) == 0) {
         handle_peers_message(msg);
     }
     else if (msg.rfind("PING", 0) == 0) {
         conn->send_line("PONG");
+    }
+    else if (msg.rfind("PUBLIC", 0) == 0) {
+        // Обрабатываем PUBLIC сообщение
+        std::istringstream iss(msg);
+        std::string cmd, addr;
+        iss >> cmd >> addr;
+
+        auto pos = addr.find(':');
+        if (pos != std::string::npos) {
+            std::string host = addr.substr(0, pos);
+            std::string port_str = addr.substr(pos + 1);
+
+            try {
+                uint16_t port = static_cast<uint16_t>(std::stoi(port_str));
+                if (add_known_peer(host, port)) {
+                    maybe_connect_to_peer(host, port);
+                }
+            } catch (...) {
+                std::cerr << "[" << id_ << "] failed to parse PUBLIC: " << addr << "\n";
+            }
+        }
+    }
+}
+
+void Peer::on_stun_result(StunClient::Result result) {
+    
+    std::cout << "[" << id_ << "] ✅ on_stun_result " "\n";
+    if (result.success) {
+        std::cout << "[" << id_ << "] ✅ STUN SUCCESS: UDP mapped address: " << result.public_ip << ":"
+                  << result.public_port << "\n";
+        if (const char* advertise_stun_tcp = std::getenv("P2P_ADVERTISE_STUN_TCP");
+            advertise_stun_tcp && *advertise_stun_tcp) {
+            public_ip_ = result.public_ip;
+            public_port_ = listen_port_;
+            advertise_public_address_ = true;
+        } else {
+            std::cout << "[" << id_ << "] not advertising STUN address as TCP-reachable; set P2P_PUBLIC_IP on a VPS "
+                      << "or P2P_ADVERTISE_STUN_TCP=1 if port forwarding is configured\n";
+        }
+
+        if (advertise_public_address_) {
+            std::cout << "[" << id_ << "] advertising TCP address: " << public_ip_ << ":" << public_port_ << "\n";
+            signal_send_line("PUBLIC " + public_ip_ + ":" +
+                             std::to_string(public_port_));
+            for (auto& conn : connections_) {
+                if (conn) {
+                    conn->send_line("PUBLIC " + public_ip_ + ":" + std::to_string(public_port_));
+                }
+            }
+        }
+    } else {
+        std::cerr << "[" << id_ << "] ❌ STUN FAILED: " << result.error_message << "\n";
+        std::cerr << "[" << id_ << "] Public address is unknown; not advertising 0.0.0.0\n";
+        public_ip_.clear();
+        public_port_ = 0;
     }
 }
 
@@ -126,6 +220,11 @@ bool Peer::add_known_peer(const tcp::endpoint& ep) {
 }
 
 bool Peer::add_known_peer(const std::string& host, uint16_t port) {
+    if (is_self_peer(host, port)) {
+        std::cout << "[" << id_ << "] ignoring self peer: " << host << ":" << port << "\n";
+        return false;
+    }
+
     std::string key = host + ":" + std::to_string(port);
     auto [it, inserted] = known_peers_.insert(key);
     if (inserted) {
@@ -178,8 +277,7 @@ void Peer::handle_peers_message(const std::string& msg) {
 
 
 void Peer::maybe_connect_to_peer(const std::string& host, uint16_t port) {
-    // не коннектимся к себе по своему порту
-    if (port == listen_port_) {
+    if (is_self_peer(host, port)) {
         return;
     }
 
@@ -191,26 +289,78 @@ void Peer::maybe_connect_to_peer(const std::string& host, uint16_t port) {
     }
 
     std::cout << "[" << id_ << "] auto-connect to " << key << "\n";
-    outbound_peers_.insert(key);
 
     // используем уже существующий connect_to
     connect_to(host, port);
 }
 
+bool Peer::is_self_peer(const std::string& host, uint16_t port) const {
+    if (port != listen_port_) {
+        return false;
+    }
+
+    if (!public_ip_.empty() && host == public_ip_) {
+        return true;
+    }
+
+    boost::system::error_code ec;
+    auto address = boost::asio::ip::make_address(host, ec);
+    if (ec) {
+        return host == "localhost";
+    }
+
+    return address.is_loopback() || address.is_unspecified();
+}
+
 void Peer::schedule_ping() {
     using namespace std::chrono_literals;
 
-    ping_timer_.expires_after(15s); // каждые 5 секунд
+    ping_timer_.expires_after(15s);
     ping_timer_.async_wait([this](boost::system::error_code ec) {
         if (ec == boost::asio::error::operation_aborted) {
-            return; // таймер отменён, уходим
+            return;
         }
 
-        if (ec) {
-            std::cerr << "[" << id_ << "] ping timer error: "
-                      << ec.message() << "\n";
-        } else {
-            // шлём PING всем активным коннекциям
+        // Чистим все соединения, у которых сокет закрыт
+        connections_.erase(
+            std::remove_if(
+                connections_.begin(),
+                connections_.end(),
+                [this](const std::shared_ptr<Connection>& c) {
+                    if (c && c->socket().is_open()) {
+                        return false;
+                    }
+
+                    if (c) {
+                        auto it = connection_peer_keys_.find(c.get());
+                        if (it != connection_peer_keys_.end()) {
+                            std::cout << "[" << id_ << "] outbound peer disconnected: " << it->second << "\n";
+                            outbound_peers_.erase(it->second);
+                            connection_peer_keys_.erase(it);
+                        }
+                    }
+
+                    return true;
+                }
+            ),
+            connections_.end()
+        );
+
+        for (const auto& peer : known_peers_) {
+            auto pos = peer.find(':');
+            if (pos == std::string::npos) {
+                continue;
+            }
+
+            try {
+                maybe_connect_to_peer(peer.substr(0, pos), static_cast<uint16_t>(std::stoi(peer.substr(pos + 1))));
+            }
+            catch (...) {
+                std::cerr << "[" << id_ << "] failed to parse known peer during reconnect: " << peer << "\n";
+            }
+        }
+
+        if (!ec) {
             std::cout << "[" << id_ << "] sending heartbeat PING to "
                       << connections_.size() << " connections\n";
 
@@ -221,7 +371,148 @@ void Peer::schedule_ping() {
             }
         }
 
-        // перепланируем следующий тик
         schedule_ping();
     });
+}
+void Peer::connect_to_signaling(const std::string& host, uint16_t port) {
+    std::cout << "[" << id_ << "] connect_to_signaling(" << host << ":" << port << ")\n";
+    signal_sock_ = std::make_shared<tcp::socket>(ctx_);
+    auto resolver = std::make_shared<tcp::resolver>(ctx_);
+
+    resolver->async_resolve(
+        host, std::to_string(port),
+        [this, resolver](boost::system::error_code ec, tcp::resolver::results_type res) {
+            if (ec) {
+                std::cerr << "[" << id_ << "] signaling resolve error: "
+                        << ec.message() << "\n";
+                return;
+            }
+
+            boost::asio::async_connect(
+                *signal_sock_, res,
+                [this](boost::system::error_code ec2, const tcp::endpoint& ep) {
+                    if (ec2) {
+                        std::cerr << "[" << id_ << "] signaling connect error: "
+                                << ec2.message() << "\n";
+                        return;
+                    }
+
+                    std::cout << "[" << id_ << "] connected to signaling "
+                            << ep << "\n";
+
+                    signal_send_line("ID " + id_);
+
+                    if (advertise_public_address_) {
+                        signal_send_line("PUBLIC " + public_ip_ + ":" +
+                                        std::to_string(public_port_));
+                    }
+
+                    signal_do_read();
+                });
+        });
+
+}
+
+void Peer::signal_send_line(const std::string& line) {
+    if (!signal_sock_ || !signal_sock_->is_open()) return;
+    std::cout << "[" << id_ << "] signaling SEND: " << line << "\n";
+
+    boost::asio::post(signal_sock_->get_executor(), [this, line]() {
+        if (!signal_sock_ || !signal_sock_->is_open()) {
+            return;
+        }
+
+        signal_write_queue_.push_back(line + "\n");
+        if (!signal_writing_) {
+            signal_writing_ = true;
+            signal_do_write();
+        }
+    });
+}
+
+void Peer::signal_do_write() {
+    if (!signal_sock_ || !signal_sock_->is_open()) {
+        signal_writing_ = false;
+        signal_write_queue_.clear();
+        return;
+    }
+
+    if (signal_write_queue_.empty()) {
+        signal_writing_ = false;
+        return;
+    }
+
+    boost::asio::async_write(
+        *signal_sock_, boost::asio::buffer(signal_write_queue_.front()),
+        [this](boost::system::error_code ec, std::size_t) {
+            if (ec) {
+                std::cerr << "[" << id_ << "] signaling write error: "
+                          << ec.message() << "\n";
+                signal_writing_ = false;
+                signal_write_queue_.clear();
+                if (signal_sock_) {
+                    signal_sock_->close();
+                }
+                return;
+            }
+
+            signal_write_queue_.pop_front();
+            signal_do_write();
+        });
+}
+
+void Peer::signal_do_read() {
+    if (!signal_sock_ || !signal_sock_->is_open()) return;
+
+    boost::asio::async_read_until(
+        *signal_sock_, signal_buf_, '\n',
+        [this](boost::system::error_code ec, std::size_t) {
+            if (ec) {
+                if (ec != boost::asio::error::operation_aborted) {
+                    std::cerr << "[" << id_ << "] signaling read error: "
+                              << ec.message() << "\n";
+                }
+                return;
+            }
+
+            std::istream is(&signal_buf_);
+            std::string line;
+            std::getline(is, line);
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (!line.empty()) {
+                handle_signal_line(line);
+            }
+
+            signal_do_read();
+        });
+}
+
+void Peer::handle_signal_line(const std::string& line) {
+    std::cout << "[" << id_ << "] signaling got: " << line << "\n";
+
+    if (line.rfind("PEER_PUBLIC", 0) == 0) {
+        std::istringstream iss(line);
+        std::string cmd, pid, addr;
+        iss >> cmd >> pid >> addr;
+
+        auto pos = addr.find(':');
+        if (pos == std::string::npos) return;
+
+        std::string host = addr.substr(0, pos);
+        std::string port_str = addr.substr(pos + 1);
+
+        try {
+            uint16_t port = static_cast<uint16_t>(std::stoi(port_str));
+
+            // Не подключаемся к себе
+            if (pid != id_) {
+                if (add_known_peer(host, port)) {
+                    maybe_connect_to_peer(host, port);
+                }
+            }
+        } catch (...) {
+            std::cerr << "[" << id_ << "] signaling parse error: "
+                      << addr << "\n";
+        }
+    }
 }
