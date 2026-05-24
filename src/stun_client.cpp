@@ -2,6 +2,7 @@
 #define BOOST_ASIO_DISABLEAwaitable
 #include <chrono>
 #include <utility>
+#include <sstream>
 #include <iostream>  // для логов
 
 #include "stun_client.hpp"
@@ -10,19 +11,71 @@
 StunClient::StunClient(boost::asio::io_context& ctx)
     : ctx_(ctx),
       socket_(ctx, udp::v4()),
-      server_endpoint_(udp::resolver(ctx)
-                           .resolve("77.110.104.122", "3478")
-                           .begin()->endpoint()),
-      timeout_timer_(ctx)
+      resolver_(ctx),
+      timeout_timer_(ctx),
+      servers_({
+          {"77.110.104.122", "3478"},
+          {"stun.l.google.com", "19302"},
+          {"stun1.l.google.com", "19302"},
+          {"stun2.l.google.com", "19302"},
+          {"stun3.l.google.com", "19302"},
+          {"stun4.l.google.com", "19302"},
+      })
 {
-    std::cout << "[STUN] Using server: " << server_endpoint_ << "\n";
 }
 
 void StunClient::get_public_address(std::function<void(Result)> callback) {
-    using namespace std::chrono_literals;
-
     callback_ = std::move(callback);
     completed_ = false;
+    server_index_ = 0;
+    last_error_.clear();
+
+    try_next_server();
+}
+
+void StunClient::try_next_server(const std::string& previous_error) {
+    if (completed_) {
+        return;
+    }
+
+    if (!previous_error.empty()) {
+        last_error_ = previous_error;
+        std::cerr << "[STUN] " << previous_error << "\n";
+    }
+
+    if (server_index_ >= servers_.size()) {
+        Result res;
+        res.success = false;
+        res.error_message = last_error_.empty() ? "All STUN servers failed" : last_error_;
+        finish(res);
+        return;
+    }
+
+    const auto server = servers_[server_index_++];
+    std::cout << "[STUN] Resolving server: " << server.host << ":" << server.port << "\n";
+
+    resolver_.async_resolve(
+        udp::v4(),
+        server.host,
+        server.port,
+        [this, server](boost::system::error_code ec, udp::resolver::results_type results) {
+            if (completed_) {
+                return;
+            }
+
+            if (ec || results.empty()) {
+                try_next_server("Resolve failed for " + server.host + ":" + server.port + ": " + ec.message());
+                return;
+            }
+
+            server_endpoint_ = results.begin()->endpoint();
+            std::cout << "[STUN] Using server: " << server_endpoint_ << "\n";
+            send_stun_request();
+        });
+}
+
+void StunClient::send_stun_request() {
+    using namespace std::chrono_literals;
 
     timeout_timer_.expires_after(5s);
     timeout_timer_.async_wait([this](boost::system::error_code ec) {
@@ -30,12 +83,10 @@ void StunClient::get_public_address(std::function<void(Result)> callback) {
             return;
         }
 
-        Result res;
-        res.success = false;
-        res.error_message = "STUN timeout";
-        std::cerr << "[STUN] Timeout waiting for response\n";
+        const auto failed_endpoint = server_endpoint_;
         socket_.cancel();
-        finish(res);
+        try_next_server("Timeout waiting for response from " + failed_endpoint.address().to_string() + ":"
+                        + std::to_string(failed_endpoint.port()));
     });
 
     // Логируем начало запроса
@@ -54,11 +105,9 @@ void StunClient::get_public_address(std::function<void(Result)> callback) {
         server_endpoint_,
         [this](const boost::system::error_code& ec, std::size_t /*bytes*/) {
             if (ec) {
-                std::cerr << "[STUN] Send error: " << ec.message() << "\n";
-                Result res;
-                res.success = false;
-                res.error_message = "Send error: " + ec.message();
-                finish(res);
+                timeout_timer_.cancel();
+                try_next_server("Send error to " + server_endpoint_.address().to_string() + ":"
+                                + std::to_string(server_endpoint_.port()) + ": " + ec.message());
                 return;
             }
 
@@ -66,7 +115,7 @@ void StunClient::get_public_address(std::function<void(Result)> callback) {
 
             socket_.async_receive_from(
                 boost::asio::buffer(buffer_),
-                server_endpoint_,
+                sender_endpoint_,
                 [this](const boost::system::error_code& ec, std::size_t bytes) {
                     handle_response(ec, bytes);
                 }
@@ -84,19 +133,20 @@ void StunClient::handle_response(const boost::system::error_code& ec, std::size_
     res.success = false;
 
     if (ec) {
-        if (ec == boost::asio::error::operation_aborted && completed_) {
+        if (ec == boost::asio::error::operation_aborted) {
             return;
         }
-        std::cerr << "[STUN] Receive error: " << ec.message() << "\n";
-        res.error_message = "Receive error: " + ec.message();
-        finish(res);
+        timeout_timer_.cancel();
+        try_next_server("Receive error from " + server_endpoint_.address().to_string() + ":"
+                        + std::to_string(server_endpoint_.port()) + ": " + ec.message());
         return;
     }
 
+    timeout_timer_.cancel();
+
     if (bytes < 20) {
-        std::cerr << "[STUN] Response too short: " << bytes << " bytes\n";
-        res.error_message = "Response too short: " + std::to_string(bytes) + " bytes";
-        finish(res);
+        try_next_server("Response too short from " + server_endpoint_.address().to_string() + ":"
+                        + std::to_string(server_endpoint_.port()) + ": " + std::to_string(bytes) + " bytes");
         return;
     }
     std::cout << "[STUN] Raw response (" << bytes << " bytes):\n";
@@ -108,9 +158,10 @@ void StunClient::handle_response(const boost::system::error_code& ec, std::size_
 
     // Проверяем заголовок
     if (buffer_[0] != 0x01 || buffer_[1] != 0x01) { // Binding Success Response
-        std::cerr << "[STUN] Not a success response: " << std::hex << (int)buffer_[0] << " " << (int)buffer_[1] << "\n";
-        res.error_message = "Not a success response";
-        finish(res);
+        std::ostringstream oss;
+        oss << "Not a success response from " << server_endpoint_ << ": " << std::hex << (int)buffer_[0] << " "
+            << (int)buffer_[1];
+        try_next_server(oss.str());
         return;
     }
 
@@ -167,8 +218,9 @@ void StunClient::handle_response(const boost::system::error_code& ec, std::size_
     }
 
     if (!res.success) {
-        std::cerr << "[STUN] No Xor-Mapped-Address found in response\n";
-        res.error_message = "No Xor-Mapped-Address found";
+        try_next_server("No Xor-Mapped-Address found in response from " + server_endpoint_.address().to_string() + ":"
+                        + std::to_string(server_endpoint_.port()));
+        return;
     }
 
     finish(res);

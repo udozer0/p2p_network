@@ -1,5 +1,6 @@
 #include "peer.hpp"
 
+#include <cstdlib>
 #include <iostream>
 #include <sstream>
 
@@ -13,7 +14,13 @@ Peer::Peer(boost::asio::io_context& ctx, uint16_t listen_port, std::string id)
     std::cout << "[" << id_ << "] ctor: starting, listen_port=" << listen_port_ << "\n";
 
     stun_client_ = std::make_unique<StunClient>(ctx_);
-    discover_public_address();
+    if (const char* public_ip = std::getenv("P2P_PUBLIC_IP"); public_ip && *public_ip) {
+        public_ip_ = public_ip;
+        public_port_ = listen_port_;
+        std::cout << "[" << id_ << "] using P2P_PUBLIC_IP: " << public_ip_ << ":" << public_port_ << "\n";
+    } else {
+        discover_public_address();
+    }
 
     std::cout << "[" << id_ << "] ctor: connecting to signaling...\n";
     connect_to_signaling("77.110.104.122", 9000);
@@ -190,6 +197,11 @@ bool Peer::add_known_peer(const tcp::endpoint& ep) {
 }
 
 bool Peer::add_known_peer(const std::string& host, uint16_t port) {
+    if (is_self_peer(host, port)) {
+        std::cout << "[" << id_ << "] ignoring self peer: " << host << ":" << port << "\n";
+        return false;
+    }
+
     std::string key = host + ":" + std::to_string(port);
     auto [it, inserted] = known_peers_.insert(key);
     if (inserted) {
@@ -242,8 +254,7 @@ void Peer::handle_peers_message(const std::string& msg) {
 
 
 void Peer::maybe_connect_to_peer(const std::string& host, uint16_t port) {
-    // не коннектимся к себе по своему порту
-    if (port == listen_port_) {
+    if (is_self_peer(host, port)) {
         return;
     }
 
@@ -259,6 +270,24 @@ void Peer::maybe_connect_to_peer(const std::string& host, uint16_t port) {
 
     // используем уже существующий connect_to
     connect_to(host, port);
+}
+
+bool Peer::is_self_peer(const std::string& host, uint16_t port) const {
+    if (port != listen_port_) {
+        return false;
+    }
+
+    if (!public_ip_.empty() && host == public_ip_) {
+        return true;
+    }
+
+    boost::system::error_code ec;
+    auto address = boost::asio::ip::make_address(host, ec);
+    if (ec) {
+        return host == "localhost";
+    }
+
+    return address.is_loopback() || address.is_unspecified();
 }
 
 void Peer::schedule_ping() {

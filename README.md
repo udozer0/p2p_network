@@ -44,6 +44,12 @@ Run the first peer:
 ./build/Release/p2p 5001
 ```
 
+On a VPS, it is better to publish the VPS public IP explicitly:
+
+```bash
+P2P_PUBLIC_IP=<vps_public_ip> ./build/Release/p2p 5001
+```
+
 Run another peer and connect it to the first one:
 
 ```bash

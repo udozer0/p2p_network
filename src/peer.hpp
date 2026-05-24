@@ -31,6 +31,7 @@ private:
     void handle_peers_message(const std::string& msg);
 
     void maybe_connect_to_peer(const std::string& host, uint16_t port);
+    bool is_self_peer(const std::string& host, uint16_t port) const;
 
     void schedule_ping(); // heartbeat
 
