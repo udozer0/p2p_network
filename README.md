@@ -2,6 +2,23 @@
 
 Small Boost.Asio P2P networking demo.
 
+## Project shape
+
+The repository now builds two targets:
+
+```text
+p2p_network  reusable static library
+p2p          CLI demo and diagnostics tool
+```
+
+Applications should include the public API:
+
+```cpp
+#include <p2p/node.hpp>
+```
+
+and link the `p2p_network` target or the `p2p::network` alias.
+
 ## Build on a clean Debian/Ubuntu VPS
 
 Install system tools:
